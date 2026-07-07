@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Storage Deck</title>
+    <link rel="stylesheet" href="/public/style.css">
+  </head>
+  <body>
+    <div class="page-shell">
+      <aside class="hero-panel">
+        <p class="eyebrow">Proxmox Storage UI</p>
+        <h1>Storage Deck</h1>
+        <p class="hero-copy">
+          A bare-metal file desk for uploads, downloads, and quick folder browsing.
+          Point it at a mounted Proxmox share and use it from any browser.
+        </p>
+
+        <div class="hero-card">
+          <span class="card-label">Current location</span>
+          <div id="breadcrumbs" class="breadcrumbs"></div>
+        </div>
+
+        <div class="hero-card">
+          <span class="card-label">Actions</span>
+          <div class="actions">
+            <label class="button button-primary">
+              <input id="file-input" type="file" multiple hidden>
+              Upload files
+            </label>
+            <button id="new-folder-button" class="button button-secondary" type="button">New folder</button>
+            <button id="refresh-button" class="button button-ghost" type="button">Refresh</button>
+          </div>
+        </div>
+
+        <div id="status" class="status-panel" aria-live="polite">Ready.</div>
+      </aside>
+
+      <main class="content-panel">
+        <div class="table-header">
+          <div>Name</div>
+          <div>Modified</div>
+          <div>Size</div>
+          <div>Action</div>
+        </div>
+        <div id="file-list" class="file-list"></div>
+      </main>
+    </div>
+
+    <template id="item-template">
+      <div class="file-row">
+        <div class="file-main">
+          <span class="file-icon"></span>
+          <button class="file-link" type="button"></button>
+        </div>
+        <div class="file-modified"></div>
+        <div class="file-size"></div>
+        <div class="file-actions">
+          <a class="download-link button button-small button-secondary">Download</a>
+          <button class="delete-button button button-small button-ghost" type="button">Delete</button>
+        </div>
+      </div>
+    </template>
+
+    <script src="/public/app.js" defer></script>
+  </body>
+  </html>
