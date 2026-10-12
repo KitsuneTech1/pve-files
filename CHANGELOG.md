@@ -1,0 +1,5 @@
+# Changelog
+
+## v0.1.0
+
+First public release. pve-files is a web file browser for Proxmox host storage, with upload and download: browse folders under a configured storage root with breadcrumbs, upload files with a size limit enforced mid-stream, download any file, create folders, and delete files or folders. This release is a security and polish pass over a tool that already worked privately. A password is now required on every route and the server refuses to start without one, so it cannot sit open by accident. Path confinement now resolves every requested path to its real location before any read, write, or delete, which closes a hole where a symlink inside the storage root could point outside it. Deleting a non-empty folder takes an explicit `recursive=1`, downloads use RFC 5987 filenames so names with spaces save correctly, and API responses carry `X-Content-Type-Options: nosniff`. A test suite of 14 cases runs under `npm test` and covers the five features plus the traversal, symlink, auth, and upload-limit claims, so the security notes are checkable rather than promised. Still zero dependencies, Node 18 or newer, standard library only.

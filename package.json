@@ -1,6 +1,6 @@
 {
   "name": "pve-files",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Web file browser for Proxmox host storage with upload and download.",
   "main": "server.js",
   "license": "MIT",
