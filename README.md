@@ -11,13 +11,16 @@ A small Node.js web UI for browsing, uploading, and downloading files on a stora
 
 ## Features
 
-- Browse folders under a configured storage root
+- Browse folders under a configured storage root, with breadcrumbs
 - Upload files directly into the current folder
 - Download files with a direct link
 - Create folders
 - Delete files or folders
-- Path-traversal protection, all paths are resolved and checked against the storage root
+- Password required on every route, the server refuses to start without one
+- Path confinement, every path is resolved to its real location (symlinks included) and checked against the storage root
 - Upload size limit, configurable, rejects oversized uploads mid-stream
+- Zero dependencies, Node standard library only
+- Tests you can run yourself: `npm test`
 
 ## Run it yourself
 
@@ -52,12 +55,12 @@ Good for trying it out before you point it at real Proxmox storage.
    npm install
    ```
    You should see it finish with no red error text (it may print `up to date` since there's nothing to fetch).
-2. Start the server:
+2. Start the server with a password of your choosing:
    ```bash
-   node server.js
+   PVE_FILES_PASSWORD=changeme node server.js
    ```
-   You should see `Proxmox storage site running on http://localhost:3000` and a line showing the storage root it's using (defaults to a `storage/` folder created next to `server.js`).
-3. Open `http://localhost:3000` in a browser.
+   You should see `pve-files running on http://localhost:3000`, the storage root it's using (defaults to a `storage/` folder created next to `server.js`), and `Authentication: on`. Without `PVE_FILES_PASSWORD` the server prints an error and exits, on purpose, so it never sits open by accident.
+3. Open `http://localhost:3000` in a browser. It asks for a username and password: `admin` and whatever you set above.
 
 **It worked if:** the page loads, shows an empty file list, and you can create a folder and upload a small test file into it.
 
@@ -92,10 +95,10 @@ This is the actual point of this app: browsing a real disk or storage pool from 
 6. Set `STORAGE_ROOT` to that mounted path and start the app:
    ```bash
    cd /opt/pve-files
-   STORAGE_ROOT=/mnt/storage node server.js
+   STORAGE_ROOT=/mnt/storage PVE_FILES_PASSWORD=changeme node server.js
    ```
-   You should see `Storage root: /mnt/storage` printed on startup, confirming it's pointed at the right place and not the default local `storage/` folder.
-7. Open `http://<lxc-ip>:3000` in a browser. You should see the real contents of your Proxmox storage.
+   You should see `Storage root: /mnt/storage` printed on startup, confirming it's pointed at the right place and not the default local `storage/` folder. Pick a real password, not `changeme`.
+7. Open `http://<lxc-ip>:3000` in a browser and log in as `admin` with that password. You should see the real contents of your Proxmox storage.
 
 **It worked if:** the file list in the browser matches what you see with `ls` on the mounted path in step 5, and a file you upload through the browser shows up on the Proxmox host's actual storage.
 
@@ -105,13 +108,14 @@ This is the actual point of this app: browsing a real disk or storage pool from 
 
 ```powershell
 $env:STORAGE_ROOT='Z:\proxmox-share'
+$env:PVE_FILES_PASSWORD='changeme'
 node server.js
 ```
 
 **Linux example** (an NFS share or any other already-mounted path):
 
 ```bash
-STORAGE_ROOT=/mnt/proxmox-storage node server.js
+STORAGE_ROOT=/mnt/proxmox-storage PVE_FILES_PASSWORD=changeme node server.js
 ```
 
 ### Example systemd service
@@ -131,6 +135,7 @@ Restart=always
 Environment=PORT=3000
 Environment=STORAGE_ROOT=/mnt/storage
 Environment=MAX_UPLOAD_BYTES=1073741824
+Environment=PVE_FILES_PASSWORD=YOUR_PASSWORD
 
 [Install]
 WantedBy=multi-user.target
@@ -143,12 +148,41 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now pve-files
 ```
 
+The unit file holds your password in plain text, so keep it root-readable only:
+
+```bash
+sudo chmod 600 /etc/systemd/system/pve-files.service
+```
+
 ### Troubleshooting
 
+- **The server prints "Refusing to start without a password" and exits**: set `PVE_FILES_PASSWORD`. This is deliberate. The app exposes host storage over HTTP, including delete, so it will not run wide open unless you ask for that with `PVE_FILES_ALLOW_NO_AUTH=1`.
+- **The browser keeps asking for a password**: the username is `admin` unless you changed `PVE_FILES_USER`. Browsers cache basic-auth credentials for the tab, so close it and reopen to retry a different password.
+- **The page loads but the file list shows "Request cannot be constructed from a URL that includes credentials"**: you opened it as `http://admin:password@host:3000/`. Browsers block `fetch` from a page loaded that way, so the listing never arrives. Open plain `http://host:3000/` instead and type the username and password into the prompt.
+- **Deleting a folder returns "Folder is not empty"**: that is the guard against wiping a tree by accident. The browser's Delete button retries with `recursive=1` after you confirm. Over the API, add `&recursive=1` yourself.
 - **Page loads but the file list is always empty, even though you know the storage has files**: `STORAGE_ROOT` is pointing at the wrong folder, most likely still the default `./storage`. Check the startup log line `Storage root: ...` and confirm it matches the path you bind-mounted or shared.
 - **Uploads fail with "Upload exceeds the ... limit"**: the file is bigger than `MAX_UPLOAD_BYTES` (default is 1 GiB, `1073741824` bytes). Raise it in `.env` or your systemd `Environment=` line, keep in mind it's in raw bytes, not MB.
 - **A request returns "Resolved path escapes storage root"**: the app blocks any path that would land outside `STORAGE_ROOT`, this is a safety check working as intended, not a bug. It usually means a stale link or a manually typed URL, not something you need to change in the storage itself.
 - **The LXC container can't see anything under the mount point**: the bind mount didn't take effect. Double-check the `pct set` command ran on the Proxmox host (not inside the container), then `pct reboot <id>` and re-check with `ls` inside the container.
+
+## Security notes
+
+Read these before you put this on a network you do not control.
+
+- **A password is required.** Every route, including the static page, needs HTTP basic auth. The server refuses to start without `PVE_FILES_PASSWORD`.
+- **Basic auth sends the password on every request, base64 encoded, not encrypted.** Over plain `http://` on a LAN that is usually fine. Over the internet, put it behind a reverse proxy with HTTPS (Caddy or Nginx), or reach it over a VPN or Tailscale. Do not port-forward it.
+- **Paths are confined to `STORAGE_ROOT`.** Requested paths are normalized, resolved to their real location with `realpath` so a symlink cannot point out of the root, and re-checked before any read, write, or delete. `npm test` covers the traversal and symlink cases.
+- **Deleting a non-empty folder needs an explicit `recursive=1`.** The UI asks you to confirm first.
+- **Uploads overwrite an existing file with the same name, without warning.** There is no versioning and no undo.
+- **There is one account.** Anyone with the password can read, write, and delete anything under the storage root.
+
+## Tests
+
+```bash
+npm test
+```
+
+This runs `node --test` (built into Node 18+, so still zero dependencies). It starts the server on an ephemeral port against a temp folder and checks the five features round-trip, that auth is enforced on every route, that traversal payloads and out-of-root symlinks are refused, that an oversized upload returns 413 and leaves nothing behind, and that the storage root itself cannot be deleted. If you do not want to take the security claims above on trust, run this.
 
 ## Config
 
@@ -159,10 +193,14 @@ Set these as environment variables, or copy `.env.example` to `.env` and load it
 | `PORT` | `3000` | Port the HTTP server listens on |
 | `STORAGE_ROOT` | `./storage` | Root directory the UI browses, uploads to, and downloads from |
 | `MAX_UPLOAD_BYTES` | `1073741824` (1 GB) | Maximum size for a single upload, larger uploads are rejected |
+| `PVE_FILES_PASSWORD` | none | Password for every route. Required. The server exits if it is unset |
+| `PVE_FILES_USER` | `admin` | Username that goes with the password |
+| `PVE_FILES_ALLOW_NO_AUTH` | `0` | Set to `1` to run with no authentication at all. Only on a host nobody else can reach |
 
 ## Next improvements
 
-- Login and authentication
+- Multiple user accounts and per-user permissions
+- Rename and move
 - Drag-and-drop upload progress
 - Chunked uploads for very large files
 - File previews
