@@ -7,8 +7,6 @@ A web file browser for Proxmox host storage, with upload and download.
 ![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-339933?logo=node.js&logoColor=white)
 
-Screenshot: docs/screenshot.png
-
 ![Screenshot](docs/screenshot.png)
 
 ## What it does
