@@ -42,7 +42,7 @@ A password is required on every route and the server refuses to start without on
    ```bash
    npm test
    ```
-   Expect `# pass 14` and `# fail 0`.
+   Expect `pass 14` and `fail 0`, and a tick next to each test.
 
 ## Use it
 
