@@ -1,12 +1,35 @@
 {
   "name": "pve-files",
-  "version": "0.1.0",
-  "private": true,
-  "description": "Web file browser and upload UI for storage mounted from your Proxmox host.",
+  "version": "1.0.0",
+  "description": "Web file browser for Proxmox host storage with upload and download.",
   "main": "server.js",
   "license": "MIT",
+  "author": "Kitsune Technologies LLC",
+  "homepage": "https://github.com/KitsuneTech1/pve-files#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KitsuneTech1/pve-files.git"
+  },
+  "bugs": {
+    "url": "https://github.com/KitsuneTech1/pve-files/issues"
+  },
+  "keywords": [
+    "proxmox",
+    "file-browser",
+    "homelab",
+    "upload",
+    "self-hosted"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "server.js",
+    "public/"
+  ],
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test": "node --test test/*.test.js"
   }
 }
