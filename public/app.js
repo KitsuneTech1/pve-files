@@ -61,6 +61,28 @@ function renderBreadcrumbs(breadcrumbs) {
   }
 }
 
+// The API refuses to delete a folder that still has anything in it unless the
+// caller asks for a recursive delete. Confirm a second time, then retry.
+async function deleteEntry(entry) {
+  const base = `/api/item?path=${encodeURIComponent(entry.path)}`;
+
+  try {
+    return await api(base, { method: "DELETE" });
+  } catch (error) {
+    if (!error.message.includes("not empty")) {
+      throw error;
+    }
+
+    const confirmed = window.confirm(`"${entry.name}" is not empty. Delete it and everything inside it?`);
+
+    if (!confirmed) {
+      throw new Error("Delete cancelled.");
+    }
+
+    return api(`${base}&recursive=1`, { method: "DELETE" });
+  }
+}
+
 function renderEntries(entries) {
   elements.fileList.replaceChildren();
 
@@ -105,7 +127,7 @@ function renderEntries(entries) {
 
       try {
         setStatus(`Deleting ${entry.name}...`);
-        await api(`/api/item?path=${encodeURIComponent(entry.path)}`, { method: "DELETE" });
+        await deleteEntry(entry);
         await loadDirectory(state.currentDir);
         setStatus(`Deleted ${entry.name}.`);
       } catch (error) {
