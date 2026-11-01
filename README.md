@@ -1,8 +1,8 @@
 <p align="center"><a href="https://kitsunetechnologies.org/work"><img src="https://raw.githubusercontent.com/KitsuneTech1/.github/main/assets/kitsune-banner.svg" alt="Built by Kitsune Technologies" width="760"></a></p>
 
-# pve-files
+# PVE File Desk
 
-A web file browser for Proxmox host storage, with upload and download.
+Web file browser for Proxmox host storage, with upload and download.
 
 ![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-339933?logo=node.js&logoColor=white)
