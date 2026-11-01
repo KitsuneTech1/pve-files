@@ -6,6 +6,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const http = require("node:http");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const os = require("node:os");
@@ -27,13 +28,72 @@ process.env.MAX_UPLOAD_BYTES = String(MAX_UPLOAD);
 process.env.PVE_FILES_PASSWORD = PASSWORD;
 process.env.PVE_FILES_ALLOW_NO_AUTH = "";
 
-const { server, start } = require("../server.js");
+const { parseMaxUploadBytes, parsePort, server, start } = require("../server.js");
 
 let baseUrl = "";
 
 function req(pathname, options = {}) {
   const headers = { Authorization: AUTH, ...(options.headers || {}) };
   return fetch(`${baseUrl}${pathname}`, { ...options, headers });
+}
+
+function requestWithHeaders(pathname, headers) {
+  const target = new URL(`${baseUrl}${pathname}`);
+
+  return new Promise((resolve, reject) => {
+    const request = http.request({
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method: "GET",
+      headers
+    }, (response) => {
+      response.resume();
+      response.on("end", () => resolve(response));
+    });
+
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+function uploadChunked(pathname, chunks) {
+  const target = new URL(`${baseUrl}${pathname}`);
+
+  return new Promise((resolve, reject) => {
+    const request = http.request({
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method: "PUT",
+      headers: {
+        Authorization: AUTH,
+        "Content-Type": "application/octet-stream"
+      }
+    }, (response) => {
+      response.resume();
+      response.on("end", () => resolve(response));
+    });
+
+    request.on("error", reject);
+    for (const chunk of chunks) {
+      request.write(chunk);
+    }
+    request.end();
+  });
+}
+
+async function stopServer() {
+  if (!server.listening) {
+    return;
+  }
+
+  await new Promise((resolve) => server.close(resolve));
+}
+
+async function startServer(options) {
+  await start(options);
+  baseUrl = `http://127.0.0.1:${server.address().port}`;
 }
 
 test.before(async () => {
@@ -48,7 +108,7 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  await new Promise((resolve) => server.close(resolve));
+  await stopServer();
   await fsp.rm(tempBase, { recursive: true, force: true });
 });
 
@@ -58,6 +118,26 @@ test("refuses to start with no password and no explicit opt-out", async () => {
     assert.match(error.message, /Refusing to start without a password/);
     return true;
   });
+});
+
+test("start options configure the password used by request authorization", async () => {
+  await stopServer();
+  await startServer({ password: "option-password", allowNoAuth: false });
+  const response = await fetch(`${baseUrl}/api/list`);
+  assert.equal(response.status, 401);
+
+  await stopServer();
+  await startServer({ password: PASSWORD, allowNoAuth: false });
+});
+
+test("invalid numeric configuration is rejected", () => {
+  assert.equal(parsePort("0"), 0);
+  assert.equal(parsePort("65535"), 65535);
+  assert.throws(() => parsePort("not-a-port"), /PORT/);
+  assert.throws(() => parsePort("65536"), /PORT/);
+  assert.equal(parseMaxUploadBytes("1"), 1);
+  assert.throws(() => parseMaxUploadBytes("not-a-number"), /MAX_UPLOAD_BYTES/);
+  assert.throws(() => parseMaxUploadBytes("0"), /MAX_UPLOAD_BYTES/);
 });
 
 test("every route requires auth when a password is set", async () => {
@@ -81,6 +161,14 @@ test("a wrong password is rejected", async () => {
   const wrong = `Basic ${Buffer.from("admin:nope").toString("base64")}`;
   const response = await fetch(`${baseUrl}/api/list`, { headers: { Authorization: wrong } });
   assert.equal(response.status, 401);
+});
+
+test("a malformed Host header does not crash the server", async () => {
+  const response = await requestWithHeaders("/api/list", {
+    Host: "[",
+    Authorization: AUTH
+  });
+  assert.equal(response.statusCode, 200);
 });
 
 test("authenticated users can load the browser", async () => {
@@ -176,6 +264,13 @@ test("source is not served through the static route", async () => {
   assert.equal(body.includes("STORAGE_ROOT"), false);
 });
 
+test("listing a file as a directory returns a client error", async () => {
+  await fsp.writeFile(path.join(storageRoot, "not-a-directory"), "file");
+  const response = await req("/api/list?dir=not-a-directory");
+  assert.equal(response.status, 400);
+  await fsp.unlink(path.join(storageRoot, "not-a-directory"));
+});
+
 test("a symlink pointing outside the root is refused", async (t) => {
   const link = path.join(storageRoot, "escape");
 
@@ -219,15 +314,14 @@ test("an oversized upload returns 413 and leaves no partial file", async () => {
   const response = await req("/api/upload?dir=&name=big.bin", {
     method: "PUT",
     body: Buffer.alloc(MAX_UPLOAD * 4, 0x61)
-  }).catch((error) => error);
+  });
+  assert.equal(response.status, 413);
 
-  // The server destroys the request mid-stream, so fetch may reject instead of
-  // returning a response. Either way the file must not survive.
-  if (response instanceof Error) {
-    assert.match(String(response), /fetch|socket|terminated|aborted/i);
-  } else {
-    assert.equal(response.status, 413);
-  }
+  const chunked = await uploadChunked("/api/upload?dir=&name=big.bin", [
+    Buffer.alloc(MAX_UPLOAD),
+    Buffer.from("one byte too many")
+  ]);
+  assert.equal(chunked.statusCode, 413);
 
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(await fsp.readFile(path.join(storageRoot, "big.bin"), "utf8"), "keep this file");
@@ -264,6 +358,15 @@ test("an upload cannot replace a folder", async () => {
   assert.equal((await fsp.stat(path.join(storageRoot, "folder-target"))).isDirectory(), true);
 });
 
+test("a null JSON body returns a client error", async () => {
+  const response = await req("/api/folder", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "null"
+  });
+  assert.equal(response.status, 400);
+});
+
 test("deleting a non-empty folder needs recursive=1", async () => {
   await req("/api/folder", {
     method: "POST",
@@ -288,7 +391,7 @@ test("the storage root itself cannot be deleted", async () => {
 });
 
 test("bad names are rejected", async () => {
-  for (const name of ["", " ", ".", "..", "a/b", "a\\b"]) {
+  for (const name of ["", " ", ".", "..", "a/b", "a\\b", "a:b", "a\nb"]) {
     const response = await req("/api/folder", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

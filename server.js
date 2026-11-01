@@ -8,14 +8,38 @@ const crypto = require("crypto");
 const { pipeline } = require("stream/promises");
 const { URL } = require("url");
 
-const PORT = Number(process.env.PORT || 3000);
+function parsePort(value) {
+  const text = String(value).trim();
+  const port = Number(text);
+
+  if (!text || !Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error("PORT must be an integer from 0 to 65535.");
+  }
+
+  return port;
+}
+
+function parseMaxUploadBytes(value) {
+  const text = String(value).trim();
+  const bytes = Number(text);
+
+  if (!text || !Number.isSafeInteger(bytes) || bytes < 1) {
+    throw new Error("MAX_UPLOAD_BYTES must be a positive safe integer.");
+  }
+
+  return bytes;
+}
+
+const PORT = parsePort(process.env.PORT ?? "3000");
 const STORAGE_ROOT = path.resolve(process.env.STORAGE_ROOT || path.join(__dirname, "storage"));
-const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 1024 * 1024 * 1024);
+const MAX_UPLOAD_BYTES = parseMaxUploadBytes(process.env.MAX_UPLOAD_BYTES ?? String(1024 * 1024 * 1024));
 const PASSWORD = process.env.PVE_FILES_PASSWORD || "";
 const AUTH_USER = process.env.PVE_FILES_USER || "admin";
 const ALLOW_NO_AUTH = process.env.PVE_FILES_ALLOW_NO_AUTH === "1";
 const PUBLIC_ROOT = path.join(__dirname, "public");
 const REALM = "pve-files";
+let activePassword = PASSWORD;
+let activeAuthUser = AUTH_USER;
 
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
@@ -52,7 +76,7 @@ function constantTimeEqual(a, b) {
 }
 
 function isAuthorized(req) {
-  if (!PASSWORD) {
+  if (!activePassword) {
     return true;
   }
 
@@ -79,7 +103,7 @@ function isAuthorized(req) {
   const user = decoded.slice(0, separator);
   const pass = decoded.slice(separator + 1);
 
-  return constantTimeEqual(user, AUTH_USER) && constantTimeEqual(pass, PASSWORD);
+  return constantTimeEqual(user, activeAuthUser) && constantTimeEqual(pass, activePassword);
 }
 
 function requireAuth(res) {
@@ -188,7 +212,15 @@ function sanitizeName(input) {
     throw new HttpError(400, "Name is required.");
   }
 
-  if (trimmed.includes("/") || trimmed.includes("\\") || trimmed === "." || trimmed === "..") {
+  if (
+    trimmed.includes("/") ||
+    trimmed.includes("\\") ||
+    trimmed === "." ||
+    trimmed === ".." ||
+    /[\u0000-\u001f\u007f<>:\"|?*]/.test(trimmed) ||
+    /[. ]$/.test(trimmed) ||
+    /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(trimmed)
+  ) {
     throw new HttpError(400, "Invalid name.");
   }
 
@@ -241,6 +273,78 @@ async function readRequestBody(req) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+function writeChunk(writeStream, chunk) {
+  return new Promise((resolve, reject) => {
+    const onError = (error) => {
+      writeStream.removeListener("error", onError);
+      reject(error);
+    };
+
+    writeStream.once("error", onError);
+    writeStream.write(chunk, () => {
+      writeStream.removeListener("error", onError);
+      resolve();
+    });
+  });
+}
+
+async function writeUploadBody(req, writeStream) {
+  let receivedBytes = 0;
+  let tooLarge = false;
+  let streamError = null;
+  const onStreamError = (error) => {
+    streamError = error;
+  };
+
+  writeStream.on("error", onStreamError);
+
+  try {
+    for await (const chunk of req) {
+      if (streamError) {
+        throw streamError;
+      }
+
+      receivedBytes += chunk.length;
+
+      if (receivedBytes > MAX_UPLOAD_BYTES) {
+        tooLarge = true;
+        continue;
+      }
+
+      await writeChunk(writeStream, chunk);
+    }
+
+    if (streamError) {
+      throw streamError;
+    }
+
+    if (tooLarge) {
+      throw new HttpError(413, `Upload exceeds the ${formatBytes(MAX_UPLOAD_BYTES)} limit.`);
+    }
+
+    await new Promise((resolve, reject) => {
+      const onError = (error) => {
+        writeStream.removeListener("error", onError);
+        reject(error);
+      };
+
+      writeStream.once("error", onError);
+      writeStream.end(() => {
+        writeStream.removeListener("error", onError);
+        resolve();
+      });
+    });
+  } catch (error) {
+    writeStream.on("error", () => {});
+    writeStream.destroy();
+    throw error;
+  } finally {
+    writeStream.removeListener("error", onStreamError);
+  }
+
+  return receivedBytes;
+}
+
 async function parseJsonBody(req) {
   const text = await readRequestBody(req);
   return text ? JSON.parse(text) : {};
@@ -248,6 +352,12 @@ async function parseJsonBody(req) {
 
 async function listDirectory(relativeDir) {
   const { safeRelative, absolute } = await resolveStoragePathChecked(relativeDir);
+  const directoryStats = await fsp.stat(absolute);
+
+  if (!directoryStats.isDirectory()) {
+    throw new HttpError(400, "Requested path is not a directory.");
+  }
+
   const entries = await fsp.readdir(absolute, { withFileTypes: true });
 
   const mapped = await Promise.all(entries.map(async (entry) => {
@@ -376,19 +486,18 @@ async function handleUpload(req, url, res) {
     }
   }
 
+  const contentLength = Number(req.headers["content-length"]);
+
+  if (Number.isSafeInteger(contentLength) && contentLength > MAX_UPLOAD_BYTES) {
+    req.resume();
+    json(res, 413, { error: `Upload exceeds the ${formatBytes(MAX_UPLOAD_BYTES)} limit.` });
+    return;
+  }
+
   const writeStream = fs.createWriteStream(tempFile, { flags: "wx" });
 
-  req.on("data", (chunk) => {
-    receivedBytes += chunk.length;
-
-    if (receivedBytes > MAX_UPLOAD_BYTES) {
-      writeStream.destroy(new Error("Upload exceeds size limit."));
-      req.destroy(new Error("Upload exceeds size limit."));
-    }
-  });
-
   try {
-    await pipeline(req, writeStream);
+    receivedBytes = await writeUploadBody(req, writeStream);
     await realPathInsideRoot(targetFile);
     await fsp.rename(tempFile, targetFile);
     json(res, 201, {
@@ -399,8 +508,8 @@ async function handleUpload(req, url, res) {
   } catch (error) {
     await fsp.rm(tempFile, { force: true }).catch(() => {});
 
-    if (String(error.message).includes("size limit")) {
-      json(res, 413, { error: `Upload exceeds the ${formatBytes(MAX_UPLOAD_BYTES)} limit.` });
+    if (error instanceof HttpError && error.statusCode === 413) {
+      json(res, error.statusCode, { error: error.message });
       return;
     }
 
@@ -433,6 +542,11 @@ async function handleDownload(url, res) {
 
 async function handleCreateFolder(req, res) {
   const body = await parseJsonBody(req);
+
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new HttpError(400, "JSON request body must be an object.");
+  }
+
   const dir = body.dir || "";
   const name = sanitizeName(body.name);
   const { absolute: parentDir } = await resolveStoragePathChecked(dir);
@@ -468,7 +582,14 @@ async function handleDelete(url, res) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  let url;
+
+  try {
+    url = new URL(req.url || "/", "http://localhost");
+  } catch {
+    json(res, 400, { error: "Invalid request URL." });
+    return;
+  }
 
   try {
     if (!isAuthorized(req)) {
@@ -561,16 +682,31 @@ async function start(options = {}) {
   }
 
   await ensureStorageRoot();
+  activePassword = password;
+  activeAuthUser = options.user ?? AUTH_USER;
 
-  server.listen(PORT, () => {
-    console.log(`pve-files running on http://localhost:${PORT}`);
-    console.log(`Storage root: ${STORAGE_ROOT}`);
+  await new Promise((resolve, reject) => {
+    const onError = (error) => {
+      server.removeListener("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.removeListener("error", onError);
+      console.log(`pve-files running on http://localhost:${PORT}`);
+      console.log(`Storage root: ${STORAGE_ROOT}`);
 
-    if (PASSWORD) {
-      console.log(`Authentication: on, user "${AUTH_USER}"`);
-    } else {
-      console.log("Authentication: OFF. Every route is open to anyone who can reach this port.");
-    }
+      if (password) {
+        console.log(`Authentication: on, user "${activeAuthUser}"`);
+      } else {
+        console.log("Authentication: OFF. Every route is open to anyone who can reach this port.");
+      }
+
+      resolve();
+    };
+
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(PORT);
   });
 }
 
@@ -581,4 +717,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, start, STORAGE_ROOT, PORT };
+module.exports = { parseMaxUploadBytes, parsePort, server, start, STORAGE_ROOT, PORT };

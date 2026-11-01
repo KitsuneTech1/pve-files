@@ -14,7 +14,7 @@ Verified on Node 24 with the repository test suite.
 | Runtime | Node.js CommonJS, `>=18`. Zero dependencies, `node:http` only |
 | Build | None. `npm install` fetches nothing, `node server.js` runs it |
 | Source | `server.js` (10 KB), `public/{index.html,app.js,style.css}` |
-| Tests | `npm test`, 16 cases, no external network access |
+| Tests | `npm test`, 21 cases, no external network access |
 | README | Long and good: install, LXC bind-mount walkthrough, systemd unit, config table, troubleshooting |
 | LICENSE | MIT, "Copyright (c) 2026 Kitsune Technologies LLC". Correct |
 | `.gitignore` | `node_modules/`, `storage/`, `.env`, `*.log`, `.oss31/`. Correct |
