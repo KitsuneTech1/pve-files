@@ -7,14 +7,14 @@ pass, not a rewrite.
 
 ## 1. What exists today
 
-Verified on the build machine at commit 47ca68a (Node v25.2.1).
+Verified on Node 24 with the repository test suite.
 
 | Thing | State |
 |---|---|
 | Runtime | Node.js CommonJS, `>=18`. Zero dependencies, `node:http` only |
 | Build | None. `npm install` fetches nothing, `node server.js` runs it |
 | Source | `server.js` (10 KB), `public/{index.html,app.js,style.css}` |
-| Tests | None. No test script, no test dir, no CI |
+| Tests | `npm test`, 16 cases, no external network access |
 | README | Long and good: install, LXC bind-mount walkthrough, systemd unit, config table, troubleshooting |
 | LICENSE | MIT, "Copyright (c) 2026 Kitsune Technologies LLC". Correct |
 | `.gitignore` | `node_modules/`, `storage/`, `.env`, `*.log`, `.oss31/`. Correct |
@@ -38,8 +38,10 @@ was tested directly, not assumed:
 - `//server/share/x`, `C:x.txt`, `/etc/hosts`, `....//....//etc/passwd` -> all
   resolve *inside* the root, so they are confined, not escapes
 
-So the README's "path-traversal protection" claim holds for `..` and absolute
-paths. Two real gaps remain, below.
+So the README's "path-traversal protection" claim holds for `..`, absolute
+paths, and symlinks. The test suite also checks that a failed replacement
+upload preserves the existing file and that an outside symlink is omitted from
+a root listing.
 
 ## 2. Smallest honest version
 
@@ -68,15 +70,19 @@ STORAGE_ROOT=/mnt/storage PVE_FILES_PASSWORD=changeme node server.js
 
 then open `http://localhost:3000`.
 
-Tested by a `test/` dir run with `node --test` (built into Node 18+, so still
-zero dependencies), added in the build phase. It starts the server on an
+Tested by the `test/server.test.js` file run by `npm test` (built into Node 18+,
+so still zero dependencies). It starts the server on an
 ephemeral port against a temp storage root and asserts: the five features
 round-trip; every traversal payload above is rejected or confined; a symlink
-pointing outside the root is refused; routes require auth when a password is
-set; an oversized upload returns 413 and leaves no partial file. `npm test`
+pointing outside the root is refused and omitted from listings; routes require
+auth when a password is set; an oversized upload returns 413 and leaves the
+existing replacement file unchanged. `npm test`
 runs it, so a stranger can check the security claims instead of trusting them.
 
-## 3. Release blockers
+## 3. Historical planning blockers
+
+The items below describe the pre-release state and the fixes that were applied.
+They are retained as release history, not as current behavior.
 
 Ordered by severity. Items 1 and 2 are the security pass the planner held July for.
 

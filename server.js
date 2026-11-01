@@ -93,6 +93,10 @@ function requireAuth(res) {
 }
 
 function normalizeRelativePath(inputPath = "") {
+  if (typeof inputPath !== "string" || inputPath.includes("\0")) {
+    throw new HttpError(400, "Invalid path.");
+  }
+
   const cleaned = inputPath.replace(/\\/g, "/").replace(/^\/+/, "");
   const normalized = path.posix.normalize(cleaned);
 
@@ -252,11 +256,20 @@ async function listDirectory(relativeDir) {
     let stats = null;
 
     try {
+      await realPathInsideRoot(entryAbsolute);
       stats = await fsp.stat(entryAbsolute);
-    } catch {
+    } catch (error) {
+      if (error instanceof HttpError) {
+        return null;
+      }
+
       // Broken symlink, or a race with another process. Fall back to the link
       // itself so the rest of the listing still renders.
-      stats = await fsp.lstat(entryAbsolute);
+      try {
+        stats = await fsp.lstat(entryAbsolute);
+      } catch {
+        return null;
+      }
     }
 
     const isDirectory = stats.isDirectory();
@@ -269,7 +282,7 @@ async function listDirectory(relativeDir) {
       sizeLabel: isDirectory ? "Folder" : formatBytes(stats.size),
       modifiedAt: stats.mtime.toISOString()
     };
-  }));
+  })).then((items) => items.filter(Boolean));
 
   mapped.sort((left, right) => {
     if (left.type !== right.type) {
@@ -346,11 +359,24 @@ async function handleUpload(req, url, res) {
   const { absolute: targetDir } = await resolveStoragePathChecked(dir);
   const targetFile = path.join(targetDir, name);
   let receivedBytes = 0;
+  const tempFile = path.join(targetDir, `.pve-files-upload-${crypto.randomUUID()}.tmp`);
 
   await fsp.mkdir(targetDir, { recursive: true });
   await realPathInsideRoot(targetFile);
 
-  const writeStream = fs.createWriteStream(targetFile, { flags: "w" });
+  try {
+    const targetStats = await fsp.lstat(targetFile);
+
+    if (targetStats.isDirectory()) {
+      throw new HttpError(409, "A folder already exists with that name.");
+    }
+  } catch (error) {
+    if (error instanceof HttpError || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  const writeStream = fs.createWriteStream(tempFile, { flags: "wx" });
 
   req.on("data", (chunk) => {
     receivedBytes += chunk.length;
@@ -363,13 +389,15 @@ async function handleUpload(req, url, res) {
 
   try {
     await pipeline(req, writeStream);
+    await realPathInsideRoot(targetFile);
+    await fsp.rename(tempFile, targetFile);
     json(res, 201, {
       ok: true,
       message: `Uploaded ${name}`,
       bytesWritten: receivedBytes
     });
   } catch (error) {
-    await fsp.rm(targetFile, { force: true }).catch(() => {});
+    await fsp.rm(tempFile, { force: true }).catch(() => {});
 
     if (String(error.message).includes("size limit")) {
       json(res, 413, { error: `Upload exceeds the ${formatBytes(MAX_UPLOAD_BYTES)} limit.` });
@@ -377,6 +405,8 @@ async function handleUpload(req, url, res) {
     }
 
     throw error;
+  } finally {
+    await fsp.rm(tempFile, { force: true }).catch(() => {});
   }
 }
 
@@ -514,14 +544,20 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-async function start() {
-  if (!PASSWORD && !ALLOW_NO_AUTH) {
-    console.error("Refusing to start without a password.");
-    console.error("Set PVE_FILES_PASSWORD to a password of your own, for example:");
-    console.error("  PVE_FILES_PASSWORD=your-password node server.js");
-    console.error("To run with no authentication anyway, set PVE_FILES_ALLOW_NO_AUTH=1.");
-    console.error("Only do that on a host nobody else can reach.");
-    process.exit(1);
+async function start(options = {}) {
+  const password = options.password ?? PASSWORD;
+  const allowNoAuth = options.allowNoAuth ?? ALLOW_NO_AUTH;
+
+  if (!password && !allowNoAuth) {
+    const error = new Error([
+      "Refusing to start without a password.",
+      "Set PVE_FILES_PASSWORD to a password of your own, for example:",
+      "  PVE_FILES_PASSWORD=your-password node server.js",
+      "To run with no authentication anyway, set PVE_FILES_ALLOW_NO_AUTH=1.",
+      "Only do that on a host nobody else can reach."
+    ].join("\n"));
+    error.code = "AUTH_REQUIRED";
+    throw error;
   }
 
   await ensureStorageRoot();
@@ -541,7 +577,7 @@ async function start() {
 if (require.main === module) {
   start().catch((error) => {
     console.error(error.message);
-    process.exit(1);
+    process.exitCode = 1;
   });
 }
 

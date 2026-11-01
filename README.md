@@ -21,7 +21,7 @@ A password is required on every route and the server refuses to start without on
 
 ## What you need
 
-- **Node.js 18 or newer.** Check with `node -v`. Download it from [nodejs.org](https://nodejs.org), or on Debian/Ubuntu run `sudo apt install nodejs npm`. Built and tested on Node 25.2.1, CI covers 18, 20, and 22.
+- **Node.js 18 or newer.** Check with `node -v`. Download it from [nodejs.org](https://nodejs.org), or on Debian/Ubuntu run `sudo apt install nodejs npm`. CI covers Node 18, 20, and 22.
 - **Git**, to clone the code. Check with `git --version`, or download a ZIP from the GitHub page instead.
 - **A folder to browse.** Any path works. For the real use case, a Proxmox storage path bind-mounted into an LXC container. This app never talks to the Proxmox API, it reads and writes plain files at the path you give it, so the storage has to already be reachable as a folder.
 
@@ -42,7 +42,7 @@ A password is required on every route and the server refuses to start without on
    ```bash
    npm test
    ```
-   Expect `pass 14` and `fail 0`, and a tick next to each test.
+   Expect `pass 16` and `fail 0`, and a tick next to each test.
 
 ## Use it
 
@@ -82,7 +82,7 @@ Open `http://localhost:3000` in a browser. It prompts for a username and passwor
 - **`Refusing to start without a password.`** on startup, and the process exits: set `PVE_FILES_PASSWORD`. This is deliberate. The tool exposes host storage over HTTP, delete included, so it will not run open unless you ask for that with `PVE_FILES_ALLOW_NO_AUTH=1`.
 - **`{"error":"Path escapes storage root."}`** or `Resolved path escapes storage root.`: a requested path would land outside `STORAGE_ROOT`, so it was refused. This is the confinement check working, not a bug. Usually a stale link, a hand-typed URL, or a symlink in your storage pointing out of the root.
 - **`{"error":"Folder is not empty. Pass recursive=1 to delete it and everything under it."}`**: the guard against wiping a tree from one request. The Delete button in the UI retries with `recursive=1` after you confirm. Over the API, add `&recursive=1` yourself.
-- **`{"error":"Upload exceeds the 1 GB limit."}`**: the file is bigger than `MAX_UPLOAD_BYTES`, which defaults to `1073741824`. Raise it, in raw bytes, not MB. The partial file is removed, so nothing is left behind.
+- **`{"error":"Upload exceeds the 1 GB limit."}`**: the file is bigger than `MAX_UPLOAD_BYTES`, which defaults to `1073741824`. Raise it, in raw bytes, not MB. The partial upload is removed and an existing file with that name is preserved.
 - **The page loads but the file list is always empty**: `STORAGE_ROOT` is pointing somewhere else, most likely the default `./storage`. Read the `Storage root:` line from startup and compare it to the path you mounted.
 
 ## Proxmox LXC setup

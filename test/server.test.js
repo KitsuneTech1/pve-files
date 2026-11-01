@@ -1,8 +1,8 @@
 "use strict";
 
-// Starts the real server as a child process on an ephemeral port against a
-// temp storage root, then exercises it over HTTP. No dependencies, node --test
-// only.
+// Starts the real server in this test process on an ephemeral loopback port
+// against a temp storage root, then exercises the HTTP user path. No external
+// network access or dependencies are needed.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -10,55 +10,26 @@ const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const net = require("node:net");
-const { spawn } = require("node:child_process");
-
-const SERVER = path.join(__dirname, "..", "server.js");
 const PASSWORD = "test-password";
 const AUTH = `Basic ${Buffer.from(`admin:${PASSWORD}`).toString("base64")}`;
 const MAX_UPLOAD = 1024;
+const tempBase = fs.mkdtempSync(path.join(os.tmpdir(), "pve-files-test-"));
+const storageRoot = path.join(tempBase, "root");
+const outsideDir = path.join(tempBase, "outside");
 
-let child = null;
+fs.mkdirSync(storageRoot, { recursive: true });
+fs.mkdirSync(outsideDir, { recursive: true });
+fs.writeFileSync(path.join(outsideDir, "SECRET.txt"), "do not read me");
+
+process.env.PORT = "0";
+process.env.STORAGE_ROOT = storageRoot;
+process.env.MAX_UPLOAD_BYTES = String(MAX_UPLOAD);
+process.env.PVE_FILES_PASSWORD = PASSWORD;
+process.env.PVE_FILES_ALLOW_NO_AUTH = "";
+
+const { server, start } = require("../server.js");
+
 let baseUrl = "";
-let storageRoot = "";
-let outsideDir = "";
-
-async function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer();
-    probe.on("error", reject);
-    probe.listen(0, "127.0.0.1", () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-}
-
-async function waitForServer(url, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    try {
-      await fetch(url, { headers: { Authorization: AUTH } });
-      return;
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
-
-  throw new Error("Server did not come up in time.");
-}
-
-function startServer(env) {
-  const proc = spawn(process.execPath, [SERVER], {
-    env: { ...process.env, ...env },
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-
-  proc.stdout.resume();
-  proc.stderr.resume();
-  return proc;
-}
 
 function req(pathname, options = {}) {
   const headers = { Authorization: AUTH, ...(options.headers || {}) };
@@ -66,44 +37,27 @@ function req(pathname, options = {}) {
 }
 
 test.before(async () => {
-  const tempBase = await fsp.mkdtemp(path.join(os.tmpdir(), "pve-files-test-"));
-  storageRoot = path.join(tempBase, "root");
-  outsideDir = path.join(tempBase, "outside");
-  await fsp.mkdir(storageRoot, { recursive: true });
-  await fsp.mkdir(outsideDir, { recursive: true });
-  await fsp.writeFile(path.join(outsideDir, "SECRET.txt"), "do not read me");
-
-  const port = await freePort();
-  baseUrl = `http://127.0.0.1:${port}`;
-
-  child = startServer({
-    PORT: String(port),
-    STORAGE_ROOT: storageRoot,
-    MAX_UPLOAD_BYTES: String(MAX_UPLOAD),
-    PVE_FILES_PASSWORD: PASSWORD,
-    PVE_FILES_ALLOW_NO_AUTH: ""
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      baseUrl = `http://127.0.0.1:${port}`;
+      resolve();
+    });
   });
-
-  await waitForServer(`${baseUrl}/api/list`);
 });
 
-test.after(() => {
-  if (child) {
-    child.kill();
-  }
+test.after(async () => {
+  await new Promise((resolve) => server.close(resolve));
+  await fsp.rm(tempBase, { recursive: true, force: true });
 });
 
 test("refuses to start with no password and no explicit opt-out", async () => {
-  const port = await freePort();
-  const proc = startServer({
-    PORT: String(port),
-    STORAGE_ROOT: storageRoot,
-    PVE_FILES_PASSWORD: "",
-    PVE_FILES_ALLOW_NO_AUTH: ""
+  await assert.rejects(() => start({ password: "", allowNoAuth: false }), (error) => {
+    assert.equal(error.code, "AUTH_REQUIRED");
+    assert.match(error.message, /Refusing to start without a password/);
+    return true;
   });
-
-  const code = await new Promise((resolve) => proc.on("exit", resolve));
-  assert.equal(code, 1);
 });
 
 test("every route requires auth when a password is set", async () => {
@@ -127,6 +81,12 @@ test("a wrong password is rejected", async () => {
   const wrong = `Basic ${Buffer.from("admin:nope").toString("base64")}`;
   const response = await fetch(`${baseUrl}/api/list`, { headers: { Authorization: wrong } });
   assert.equal(response.status, 401);
+});
+
+test("authenticated users can load the browser", async () => {
+  const response = await req("/");
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /<title>pve-files<\/title>/);
 });
 
 test("the five features round-trip", async () => {
@@ -177,7 +137,8 @@ test("traversal payloads are rejected or confined", async () => {
     "....//....//etc/passwd",
     "/etc/hosts",
     "C:\\Windows\\win.ini",
-    "//server/share/x"
+    "//server/share/x",
+    "bad\0path"
   ];
 
   for (const payload of payloads) {
@@ -234,6 +195,9 @@ test("a symlink pointing outside the root is refused", async (t) => {
     const listed = await req("/api/list?dir=escape");
     assert.equal(listed.status, 400);
 
+    const rootListing = await (await req("/api/list")).json();
+    assert.equal(rootListing.entries.some((entry) => entry.name === "escape"), false);
+
     const written = await req("/api/upload?dir=escape&name=planted.txt", {
       method: "PUT",
       body: "planted"
@@ -250,6 +214,8 @@ test("a symlink pointing outside the root is refused", async (t) => {
 });
 
 test("an oversized upload returns 413 and leaves no partial file", async () => {
+  await fsp.writeFile(path.join(storageRoot, "big.bin"), "keep this file");
+
   const response = await req("/api/upload?dir=&name=big.bin", {
     method: "PUT",
     body: Buffer.alloc(MAX_UPLOAD * 4, 0x61)
@@ -264,7 +230,14 @@ test("an oversized upload returns 413 and leaves no partial file", async () => {
   }
 
   await new Promise((resolve) => setTimeout(resolve, 200));
-  assert.equal(fs.existsSync(path.join(storageRoot, "big.bin")), false);
+  assert.equal(await fsp.readFile(path.join(storageRoot, "big.bin"), "utf8"), "keep this file");
+
+  const replaced = await req("/api/upload?dir=&name=big.bin", {
+    method: "PUT",
+    body: "replacement"
+  });
+  assert.equal(replaced.status, 201);
+  assert.equal(await fsp.readFile(path.join(storageRoot, "big.bin"), "utf8"), "replacement");
 });
 
 test("an upload at the limit still succeeds", async () => {
@@ -278,6 +251,17 @@ test("an upload at the limit still succeeds", async () => {
   assert.equal(stats.size, MAX_UPLOAD);
 
   await req("/api/item?path=atlimit.bin", { method: "DELETE" });
+});
+
+test("an upload cannot replace a folder", async () => {
+  await fsp.mkdir(path.join(storageRoot, "folder-target"));
+  const response = await req("/api/upload?name=folder-target", {
+    method: "PUT",
+    body: "not a folder"
+  });
+
+  assert.equal(response.status, 409);
+  assert.equal((await fsp.stat(path.join(storageRoot, "folder-target"))).isDirectory(), true);
 });
 
 test("deleting a non-empty folder needs recursive=1", async () => {
