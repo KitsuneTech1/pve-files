@@ -1,146 +1,130 @@
 <p align="center"><a href="https://kitsunetechnologies.org/work"><img src="https://raw.githubusercontent.com/KitsuneTech1/.github/main/assets/kitsune-banner.svg" alt="Built by Kitsune Technologies" width="760"></a></p>
 
-# PVE File Desk
+# PVE File Desk (pve-files)
 
-Web file browser for Proxmox host storage, with upload and download.
+> Secure, zero-dependency web file manager tailored for Proxmox VE host storage, bind-mounts, and homelab servers. Hardened path traversal prevention, authenticated endpoints, and streaming upload/download.
 
-![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Node](https://img.shields.io/badge/node-%3E%3D18-339933?logo=node.js&logoColor=white)
+<p align="center">
+  <a href="https://github.com/KitsuneTech1/pve-files/releases"><img src="https://img.shields.io/github/v/release/KitsuneTech1/pve-files?style=flat-square&color=blue" alt="Release"></a>
+  <a href="https://github.com/KitsuneTech1/pve-files/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/KitsuneTech1/pve-files/ci.yml?branch=master&label=CI&style=flat-square" alt="CI Status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License"></a>
+  <a href="https://nodejs.org"><img src="https://img.shields.io/badge/Node.js-18+-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node Version"></a>
+  <a href="package.json"><img src="https://img.shields.io/badge/Dependencies-0-success?style=flat-square" alt="Dependencies"></a>
+  <a href="server.js"><img src="https://img.shields.io/badge/Platform-Proxmox%20%7C%20Linux%20%7C%20Windows-E95420?style=flat-square" alt="Target Platforms"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/KitsuneTech1/pve-files/releases/latest"><strong>📦 Download Latest Release ZIP</strong></a> •
+  <a href="#-quick-start-noob-friendly"><strong>⚡ Quick Start Guide</strong></a> •
+  <a href="#-proxmox--lxc-homelab-deployment"><strong>🖥️ Proxmox Deployment</strong></a>
+</p>
+
+---
 
 ![Screenshot](docs/screenshot.png)
 
-## What it does
+## Architecture & Confinement Model
 
-- Browse folders under a configured storage root, with breadcrumbs
-- Upload files into the current folder, with a size limit enforced mid-stream
-- Download any file in the root
-- Create a folder
-- Delete a file or folder, behind authentication
+```mermaid
+flowchart TD
+    User([Browser Client]) -->|Basic Auth Credentials| Guard{Auth Gate & Password Check}
+    Guard -->|Missing or Bad Password| 401[HTTP 401 Unauthorized]
+    Guard -->|Authenticated Session| Engine[Path Confinement & Realpath Engine]
+    
+    subgraph Storage Sandbox [Strictly Confined to STORAGE_ROOT]
+        Engine -->|Resolve Symlinks & Relative Paths| Check{Path inside Root?}
+        Check -->|No: Escapes Storage Root| 403[HTTP 403 / 404 Access Denied]
+        Check -->|Yes: Verified Safe| Disk[(Host Storage / Bind Mount)]
+    end
+    
+    Disk -->|Stream File Bytes| User
+```
 
-A password is required on every route and the server refuses to start without one. Every path is resolved to its real location, symlinks included, and re-checked against the storage root before any read, write, or delete. Zero dependencies, Node standard library only. Run `npm test` to check those claims yourself.
+---
 
-## What you need
+## Features
 
-- **Node.js 18 or newer.** Check with `node -v`. Download it from [nodejs.org](https://nodejs.org), or on Debian/Ubuntu run `sudo apt install nodejs npm`. CI covers Node 18, 20, and 22.
-- **Git**, to clone the code. Check with `git --version`, or download a ZIP from the GitHub page instead.
-- **A folder to browse.** Any path works. For the real use case, a Proxmox storage path bind-mounted into an LXC container. This app never talks to the Proxmox API, it reads and writes plain files at the path you give it, so the storage has to already be reachable as a folder.
+- **Zero Dependencies**: Built strictly using Node.js core libraries. Zero `node_modules` attack surface, no supply-chain risks.
+- **Strict Path Confinement**: Every requested file path is verified via realpath/readlink against `STORAGE_ROOT`. Symlink escapes and `../` traversal attempts are rejected at the edge.
+- **Fail-Closed Authentication**: Server refuses to boot unless a password (`PVE_FILES_PASSWORD`) is configured.
+- **Mid-Stream Quota Protection**: Upload file size limits are enforced mid-stream; oversized payloads are aborted immediately without leaving temporary orphans on disk.
+- **Recursive Directory Protection**: Recursive directory deletion requires explicit confirmation flags to prevent accidental root deletions.
 
-## Install
+---
 
-1. Get the code:
-   ```bash
-   git clone https://github.com/KitsuneTech1/pve-files.git
-   cd pve-files
-   ```
-   You should now see `server.js` and `package.json` in the folder.
-2. Install dependencies. There are none beyond Node itself, so this fetches nothing:
-   ```bash
-   npm install
-   ```
-   Expect `up to date` or a line like `found 0 vulnerabilities`, and no red error text.
-3. Confirm the build is sound:
-   ```bash
-   npm test
-   ```
-   Expect `pass 21` and `fail 0`, and a tick next to each test.
+## 🚀 Quick Start (Noob-Friendly)
 
-## Use it
+### Option 1: One-Click Launch (Windows / Mac / Linux)
+1. Download the [**Latest Release ZIP**](https://github.com/KitsuneTech1/pve-files/releases/latest) and extract it.
+2. Double-click **`start.bat`** (Windows) or execute `./start.sh` (macOS/Linux).
+3. The app starts on `http://localhost:3000` with sample storage and opens in your default browser.
+4. Log in using username **`admin`** and password from `.env` (default: `changeme`).
 
-Start it against a folder, with a password of your choosing:
+---
+
+## 🖥️ Proxmox & LXC Homelab Deployment
+
+Run PVE File Desk in an unprivileged or privileged LXC container with a bind-mount to your ZFS pool or storage directory:
 
 ```bash
-STORAGE_ROOT=/mnt/storage PVE_FILES_PASSWORD=changeme node server.js
-```
+# 1. Clone into container
+git clone https://github.com/KitsuneTech1/pve-files.git /opt/pve-files
+cd /opt/pve-files
 
-On Windows PowerShell:
-
-```powershell
-$env:STORAGE_ROOT='Z:\proxmox-share'; $env:PVE_FILES_PASSWORD='changeme'; node server.js
-```
-
-You should see exactly three lines:
-
-```
-pve-files running on http://localhost:3000
-Storage root: /mnt/storage
-Authentication: on, user "admin"
-```
-
-Check that `Storage root:` is the folder you meant. If you leave `STORAGE_ROOT` out, it creates and uses a `storage/` folder next to `server.js`.
-
-Open `http://localhost:3000` in a browser. It prompts for a username and password: `admin`, and whatever you set above. Pick a real password before you put this on a network.
-
-## It worked if ...
-
-- The page loads and the file list matches what `ls` shows on your storage path.
-- You can create a folder, upload a small test file into it, and download that file back.
-- A file you upload through the browser appears on the real storage, not just in the UI.
-- Opening `http://localhost:3000` in a private window prompts for the password instead of showing the files.
-
-## Troubleshooting
-
-- **`Refusing to start without a password.`** on startup, and the process exits: set `PVE_FILES_PASSWORD`. This is deliberate. The tool exposes host storage over HTTP, delete included, so it will not run open unless you ask for that with `PVE_FILES_ALLOW_NO_AUTH=1`.
-- **`{"error":"Path escapes storage root."}`** or `Resolved path escapes storage root.`: a requested path would land outside `STORAGE_ROOT`, so it was refused. This is the confinement check working, not a bug. Usually a stale link, a hand-typed URL, or a symlink in your storage pointing out of the root.
-- **`{"error":"Folder is not empty. Pass recursive=1 to delete it and everything under it."}`**: the guard against wiping a tree from one request. The Delete button in the UI retries with `recursive=1` after you confirm. Over the API, add `&recursive=1` yourself.
-- **`{"error":"Upload exceeds the 1 GB limit."}`**: the file is bigger than `MAX_UPLOAD_BYTES`, which defaults to `1073741824`. Raise it, in raw bytes, not MB. The partial upload is removed and an existing file with that name is preserved.
-- **The page loads but the file list is always empty**: `STORAGE_ROOT` is pointing somewhere else, most likely the default `./storage`. Read the `Storage root:` line from startup and compare it to the path you mounted.
-
-## Proxmox LXC setup
-
-To browse real Proxmox storage, bind-mount it into a container. Run this on the Proxmox host, not inside the container, replacing `105` with your container ID and `/mnt/pve/your-storage` with the storage path from Datacenter > Storage:
-
-```bash
-pct set 105 -mp0 /mnt/pve/your-storage,mp=/mnt/storage
-pct reboot 105
-```
-
-Inside the container, `ls /mnt/storage` should show the host's files. Then run the app there with `STORAGE_ROOT=/mnt/storage`.
-
-### Keep it running with systemd
-
-Create `/etc/systemd/system/pve-files.service`:
-
-```ini
+# 2. Configure systemd service
+cat << 'EOF' > /etc/systemd/system/pve-files.service
 [Unit]
-Description=pve-files storage browser
+Description=PVE File Desk
 After=network.target
 
 [Service]
 Type=simple
+User=root
 WorkingDirectory=/opt/pve-files
-ExecStart=/usr/bin/node server.js
-Restart=always
 Environment=PORT=3000
 Environment=STORAGE_ROOT=/mnt/storage
-Environment=PVE_FILES_PASSWORD=YOUR_PASSWORD
+Environment=PVE_FILES_USER=admin
+Environment=PVE_FILES_PASSWORD=YourSecurePasswordHere
+ExecStart=/usr/bin/node server.js
+Restart=always
 
 [Install]
 WantedBy=multi-user.target
+EOF
+
+# 3. Enable and start service
+systemctl daemon-reload
+systemctl enable --now pve-files
 ```
 
-Then `sudo chmod 600 /etc/systemd/system/pve-files.service` (it holds your password in plain text) and `sudo systemctl enable --now pve-files`.
+---
 
-## Config
+## 🧪 Testing & Verification
 
-| Variable | Default | Description |
-|---|---|---|
-| `PORT` | `3000` | Port the HTTP server listens on |
-| `STORAGE_ROOT` | `./storage` | Root directory the UI browses, uploads to, and downloads from |
-| `MAX_UPLOAD_BYTES` | `1073741824` | Maximum size of a single upload, in bytes |
-| `PVE_FILES_PASSWORD` | none | Password for every route. Required, the server exits if it is unset |
-| `PVE_FILES_USER` | `admin` | Username that goes with the password |
-| `PVE_FILES_ALLOW_NO_AUTH` | `0` | Set to `1` to run with no authentication. Only on a host nobody else can reach |
+Run the automated offline test suite:
 
-## Security notes
+```bash
+npm test
+```
 
-- **Basic auth sends the password on every request, base64 encoded, not encrypted.** On a LAN over plain HTTP that is usually fine. Over the internet, put it behind a reverse proxy with HTTPS, or reach it over a VPN. Do not port-forward it.
-- **There is one account.** Anyone with the password can read, write, and delete anything under the storage root.
-- **Uploads overwrite a file of the same name without warning.** No versioning, no undo.
+Tests cover:
+- Compulsory password enforcement on startup.
+- Full API round-trips (create directory, stream upload, download, delete).
+- Traversal payloads, symlink escape attempts, and host header tampering.
+- Mid-stream 413 payload truncation without orphan leftovers.
+
+---
+
+## 🔒 Security Specifications
+
+- **Zero NPM Dependencies**: Eliminates supply chain poisoning risk.
+- **Defensive IO**: Rejects null-byte injections, directory rename collisions, and unconfined symlinks.
+- **HTTP Security Headers**: Emits strict `X-Content-Type-Options: nosniff` headers on all responses.
+
+---
 
 ## License
 
-MIT. Copyright (c) 2026 Kitsune Technologies LLC. Do what you like with it, commercially or otherwise, just keep the copyright notice. Full text in [LICENSE](LICENSE).
-
----
+MIT. Copyright (c) 2026 Kitsune Technologies LLC. Full text in [LICENSE](LICENSE).
 
 <p align="center"><sub>Part of <b>Buildtober 2026</b>: 31 open source projects in 31 days. Built by <a href="https://kitsunetechnologies.org/work">Kitsune Technologies</a>. More at <a href="https://github.com/KitsuneTech1">github.com/KitsuneTech1</a>.</sub></p>
